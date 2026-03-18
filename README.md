@@ -86,7 +86,7 @@ Put the institutional workbook in:
 
 - `data/models/`
 
-AidWise also checks `data/policy/` for the workbook as a fallback, since the current project file was placed there.
+AidWise also checks `data/policy/` as a fallback if no workbook is found in `data/models/`.
 
 ## Run the app
 
