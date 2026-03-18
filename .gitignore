@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.streamlit/
+data/policy/*.pdf
+data/models/*.xlsx
+data/models/*.xlsm
+data/models/*.xls
