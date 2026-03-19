@@ -1,33 +1,29 @@
 # AidWise
 
-AidWise is a grounded financial aid estimation app for Student Aid Index (SAI) and Pell Grant eligibility. This version uses the official PDF for grounded policy retrieval and the provided Excel workbook for deterministic calculations through local Excel automation.
+AidWise is a grounded proof of concept for estimating Student Aid Index (SAI), Maximum Pell, and Minimum Pell from student input data. This version no longer depends on Excel at runtime. The calculator is implemented in Python, the policy guide is used for grounded retrieval, and the app accepts student records as CSV input.
 
-Current version: `0.1.0`
+Current version: `0.2.0`
 
-## What is implemented now
+## What this version does
 
-- A Streamlit interface for structured SAI and Pell inputs
-- A workbook-backed calculator that writes inputs into the `Calculator` tab and reads back:
+- Upload a CSV file with the student fields needed for the calculation
+- Compute:
   - SAI
-  - minimum Pell indicator
-  - maximum Pell indicator
+  - Minimum Pell eligibility
+  - Maximum Pell eligibility
+  - formula type
   - assets-required flag
-  - selected formula type
-- Grounded retrieval over local policy documents in `data/policy/`
-- Query routing for informational, calculation, explanation, and what-if requests
-- An OpenAI explanation layer with a local fallback when no API key is configured
-- Tests that validate the integration against the saved calculator-tab workbook outputs
+- Answer policy and explanation questions about a selected student row
+- Retrieve supporting passages from local policy documents in `data/policy/`
+- Use the OpenAI API for grounded explanations when available
+- Fall back to a deterministic local explanation when no API key is configured
 
-## Current scope
+## What changed in `v0.2.0`
 
-The current calculation path is accurate to the supplied workbook, but it is still a first implementation of the product:
-
-- It depends on Microsoft Excel being available locally.
-- It uses the workbook directly instead of a full pure-Python translation.
-- It supports the `Calculator` tab cleanly now, which is the actual calculator in your workbook.
-- The `Student Info` sheet appears to contain saved values that do not match a fresh recalculation from its visible inputs, so that tab likely depends on workbook macros or a separate refresh flow.
-
-This is still a strong foundation because it gives us a grounded end-to-end app with real workbook execution while we continue porting the logic into Python.
+- Removed the Excel workbook from the runtime path
+- Replaced workbook execution with a pure Python calculation engine
+- Switched the user input flow from manual form entry to CSV upload
+- Kept the grounded Q&A and explanation workflow so users can ask why a student got a result
 
 ## Project structure
 
@@ -36,15 +32,16 @@ This is still a strong foundation because it gives us a grounded end-to-end app 
 |-- app.py
 |-- aidwise/
 |   |-- calculator.py
+|   |-- csv_loader.py
 |   |-- llm.py
 |   |-- models.py
 |   |-- orchestrator.py
 |   |-- retrieval.py
-|   |-- sources.py
-|   `-- routing.py
+|   |-- routing.py
+|   `-- sources.py
 |-- data/
-|   |-- models/
-|   `-- policy/
+|   |-- policy/
+|   `-- templates/
 |-- tests/
 |-- requirements.txt
 `-- README.md
@@ -67,26 +64,47 @@ pip install -r requirements.txt
 
 ### 3. Configure OpenAI
 
-Set environment variables:
-
 ```powershell
 $env:OPENAI_API_KEY="your_api_key_here"
 $env:OPENAI_MODEL="gpt-5-mini"
 ```
 
-If `OPENAI_API_KEY` is not set, AidWise still runs and falls back to a local explanation template.
+If `OPENAI_API_KEY` is not set, AidWise still runs and uses a local fallback explanation.
 
-### 4. Add source files
+### 4. Add the policy guide
 
-Put policy documents in:
+Put the official policy document in:
 
 - `data/policy/`
 
-Put the institutional workbook in:
+Supported file types:
 
-- `data/models/`
+- `.pdf`
+- `.txt`
+- `.md`
 
-AidWise also checks `data/policy/` as a fallback if no workbook is found in `data/models/`.
+## CSV input format
+
+AidWise expects one student per row. The CSV must include every field in the `AidInput` schema.
+
+A starter template is included here:
+
+- `data/templates/student_input_template.csv`
+
+Key columns include:
+
+- `dependency_status`
+- `parent_family_size`
+- `parent_filing_status`
+- `parent_agi`
+- `parent_income_tax_paid`
+- `parent_1_wages`
+- `student_filing_status`
+- `student_agi`
+- `student_family_size`
+- `student_marital_status`
+
+The template includes all required columns, including optional fields that default to `0`, `No`, or blank dates.
 
 ## Run the app
 
@@ -94,70 +112,61 @@ AidWise also checks `data/policy/` as a fallback if no workbook is found in `dat
 streamlit run app.py
 ```
 
+Workflow:
+
+1. Upload a CSV file.
+2. Review the calculated results table.
+3. Select a student row.
+4. Ask AidWise to explain the result or run a what-if income comparison.
+5. Ask follow-up questions about why that student got the displayed outcome.
+
 ## Run tests
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-## How the current version works
+## How the POC works
+
+### Calculation engine
+
+The calculator is now implemented directly in Python. It computes SAI and Pell-related outputs from structured student data without calling Excel or VBA.
 
 ### Retrieval
 
-The retriever scans local files in `data/policy/`, extracts text, breaks it into chunks, and returns the top chunks with simple keyword overlap scoring. This keeps the responses grounded in the official guide while we keep the retrieval layer lightweight.
+The retriever scans local policy files, extracts text, chunks it, and returns the top matching passages with a lightweight keyword-overlap search. This keeps explanations tied to the supplied policy guide.
 
-### Calculation
-
-AidWise now uses the provided workbook as the deterministic calculation engine:
-
-1. It locates the workbook.
-2. It opens Excel in the background.
-3. It writes the form inputs into the workbook `Calculator` tab.
-4. It forces a recalculation.
-5. It reads back the workbook outputs.
-
-This gives us workbook-aligned results without having to guess formula behavior.
-
-AidWise also now mirrors the workbook's `Student Info` macro flow explicitly in Python:
-
-1. Copy `Student Info!A:AY` for a selected row.
-2. Paste those values into `Calculator!R:BP`.
-3. Recalculate the workbook.
-4. Read the live outputs from `Calculator!BQ:BS`.
-5. Write those back to `Student Info!AZ:BB`.
-
-This avoids relying on VBA execution just to understand how the `Student Info` sheet feeds the calculator.
-
-### Explanation
+### Explanation layer
 
 AidWise combines:
 
 - query routing
-- retrieved evidence
-- calculator outputs
+- calculated outputs
+- retrieved policy evidence
 
-and then uses the OpenAI API, when available, to generate grounded plain-language explanations. If the API is unavailable, it falls back to a deterministic explanation template.
+and then generates a grounded explanation. When the OpenAI API is unavailable, AidWise returns a deterministic fallback explanation instead.
 
 ## Verification status
 
-- The default calculator-tab demo currently returns:
-  - `Formula A`
-  - `SAI = 5041`
-  - `Max Pell = No`
-  - `Min Pell = Yes`
-  - `Assets Required = Yes`
-- These values are covered by `tests/test_calculator.py`.
+Current automated checks:
 
-## Student Info Flow
+- `python -m unittest discover -s tests`
+- `python -m compileall .`
 
-AidWise now mirrors the workbook's `Student Info` macro flow directly and follows the live recalculated workbook values rather than relying on saved worksheet caches. For example, `Student Info` row 2 currently recalculates to `SAI = -1499`, `Min Pell = Yes`, and `Max Pell = Yes` through the live workbook path.
+The canonical demo scenario currently validates to:
 
-## Next steps
+- `Formula A`
+- `SAI = 5041`
+- `Minimum Pell = Yes`
+- `Maximum Pell = No`
+- `Assets Required = Yes`
 
-1. Port the workbook logic into pure Python so AidWise does not depend on local Excel.
-2. Add page-aware citations for the PDF.
-3. Expand validation with more workbook scenarios.
-4. Add a dedicated workflow for sanitizing `Student Info` metadata fields before sharing the workbook.
+## Current limitations
+
+- This is still an educational estimator, not an official federal aid determination
+- Retrieval is intentionally lightweight and does not yet use vector search
+- Validation should be expanded with more policy scenarios and edge cases
+- Explanations are only as grounded as the local policy files you provide
 
 ## Disclaimer
 

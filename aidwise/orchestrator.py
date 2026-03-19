@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aidwise.calculator import WorkbookAidCalculator
+from aidwise.calculator import AidCalculator
 from aidwise.llm import GroundedExplainer
 from aidwise.models import AidInput, QueryResponse, ScenarioComparison
 from aidwise.retrieval import SimpleRetriever
@@ -11,11 +11,11 @@ class AidWiseOrchestrator:
     def __init__(
         self,
         retriever: SimpleRetriever | None = None,
-        calculator: WorkbookAidCalculator | None = None,
+        calculator: AidCalculator | None = None,
         explainer: GroundedExplainer | None = None,
     ):
         self.retriever = retriever or SimpleRetriever()
-        self.calculator = calculator or WorkbookAidCalculator()
+        self.calculator = calculator or AidCalculator()
         self.explainer = explainer or GroundedExplainer()
 
     def estimate(self, aid_input: AidInput) -> QueryResponse:

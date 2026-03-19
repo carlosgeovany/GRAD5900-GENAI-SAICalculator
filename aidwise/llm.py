@@ -39,6 +39,7 @@ class GroundedExplainer:
                 f"Assets required: {calculation.assets_required}\n"
                 f"Methodology: {calculation.methodology}\n"
                 f"Warning: {calculation.warning or 'None'}\n"
+                f"Details: {calculation.details or 'None'}\n"
             )
         comparison_block = comparison.summary if comparison else ""
 
@@ -63,8 +64,8 @@ class GroundedExplainer:
                         f"Calculation context:\n{calc_block or 'None'}\n"
                         f"Scenario comparison:\n{comparison_block or 'None'}\n\n"
                         f"Evidence:\n{evidence_block or 'No evidence loaded.'}\n\n"
-                        "Write a concise explanation in plain language. Mention whether the "
-                        "result came from the workbook-backed calculator or a fallback path."
+                        "Write a concise explanation in plain language. Explain why the student "
+                        "got this result using the numeric calculation context and the policy evidence."
                     ),
                 },
             ],
@@ -83,8 +84,7 @@ class GroundedExplainer:
     ) -> str:
         sentences: list[str] = [f"Route selected: {route.replace('_', ' ')}."]
         if calculation:
-            basis = "workbook-backed" if "Workbook-backed" in calculation.methodology else "fallback"
-            sentences.append(f"The {basis} calculator estimated an SAI of {calculation.sai}.")
+            sentences.append(f"The calculator estimated an SAI of {calculation.sai}.")
             if calculation.maximum_pell_eligible:
                 sentences.append("This scenario appears eligible for maximum Pell.")
             elif calculation.minimum_pell_eligible:
@@ -92,7 +92,16 @@ class GroundedExplainer:
             else:
                 sentences.append("This scenario does not appear Pell-eligible.")
             if calculation.formula_type:
-                sentences.append(f"The workbook selected {calculation.formula_type}.")
+                sentences.append(f"The calculator selected {calculation.formula_type}.")
+            if calculation.details:
+                if "agi_for_pell" in calculation.details:
+                    sentences.append(
+                        f"AGI plus foreign income exclusion considered for Pell was ${calculation.details['agi_for_pell']:,.0f}."
+                    )
+                if "raw_sai_before_pell_adjustment" in calculation.details:
+                    sentences.append(
+                        f"The raw SAI before Pell adjustment was {calculation.details['raw_sai_before_pell_adjustment']}."
+                    )
             if calculation.warning:
                 sentences.append(calculation.warning)
         if comparison:

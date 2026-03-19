@@ -1,204 +1,45 @@
 from __future__ import annotations
 
-from datetime import date, datetime
-from pathlib import Path
-import shutil
-import tempfile
-from contextlib import contextmanager
-
-import pythoncom
+from dataclasses import dataclass
+from datetime import date
+from typing import Any
 
 from aidwise.models import AidInput, CalculationResult, ScenarioComparison
-from aidwise.sources import find_workbook
-
-try:
-    import win32com.client
-except ImportError:  # pragma: no cover
-    win32com = None
 
 
 YES = "Yes"
 NO = "No"
+OTHER_STATE = "OTHER"
+ALASKA = "AK"
+HAWAII = "HI"
+
+MARRIED_JOINT_FILING = {"Married filing Jointly"}
+MARRIED_SEPARATE_FILING = {"Married filing Separate"}
+UNMARRIED_STUDENT_STATUSES = {"Single", "Separated", "Divorced", "Widowed"}
+MARRIED_STUDENT_STATUSES = {"Married", "Remarried"}
+
+PARENT_IPA_BASE = {2: 29190, 3: 36330, 4: 44880, 5: 52950, 6: 61930}
+SINGLE_WITH_DEPENDENTS_IPA = {2: 54950, 3: 68430, 4: 84480, 5: 99700, 6: 116590}
+MARRIED_WITH_DEPENDENTS_IPA = {3: 57730, 4: 71280, 5: 84120, 6: 98370}
+
+@dataclass(slots=True)
+class SAIComponents:
+    formula_type: str
+    assets_required: bool
+    raw_sai: int
+    parent_contribution: float = 0.0
+    student_income_contribution: float = 0.0
+    student_asset_contribution: float = 0.0
+    max_pell_threshold: float | None = None
+    min_pell_threshold: float | None = None
+    agi_for_pell: float = 0.0
 
 
-class PrototypeAidCalculator:
-    """Fallback logic when the official workbook cannot be executed."""
-
+class AidCalculator:
     methodology = (
-        "Fallback heuristic mode. The official workbook was not available, so AidWise "
-        "used a simplified estimate instead of the validated Excel model."
+        "Pure Python policy engine. AidWise calculates SAI, Maximum Pell, and Minimum Pell "
+        "without using the Excel workbook at runtime."
     )
-
-    def calculate(self, aid_input: AidInput) -> CalculationResult:
-        if aid_input.dependency_status == "Dependent":
-            income_total = aid_input.parent_agi + aid_input.student_agi
-            asset_total = (
-                aid_input.parent_cash_savings
-                + aid_input.parent_investments
-                + aid_input.parent_business_farm
-                + aid_input.student_cash_savings
-                + aid_input.student_investments
-                + aid_input.student_business_farm
-            )
-            family_size = aid_input.parent_family_size
-        else:
-            income_total = aid_input.student_agi
-            asset_total = (
-                aid_input.student_cash_savings
-                + aid_input.student_investments
-                + aid_input.student_business_farm
-            )
-            family_size = aid_input.student_family_size
-
-        discretionary_income = max(income_total - max(family_size - 1, 0) * 6_000, 0)
-        sai = max(-1_500, round(discretionary_income * 0.22 + asset_total * 0.12) - 1_500)
-
-        return CalculationResult(
-            sai=sai,
-            minimum_pell_eligible=sai <= 7_395,
-            maximum_pell_eligible=sai <= 0,
-            methodology=self.methodology,
-            rationale=[
-                f"Fallback income basis: ${income_total:,.0f}",
-                f"Fallback asset basis: ${asset_total:,.0f}",
-            ],
-            warning=(
-                "Excel automation or the official workbook was unavailable, so this estimate "
-                "uses fallback logic."
-            ),
-        )
-
-    def compare_income_change(
-        self, aid_input: AidInput, income_delta: float
-    ) -> ScenarioComparison:
-        baseline = self.calculate(aid_input)
-        scenario = self.calculate(aid_input.with_income_delta(income_delta))
-        direction = "decreases" if income_delta < 0 else "increases"
-        return ScenarioComparison(
-            baseline=baseline,
-            scenario=scenario,
-            summary=(
-                f"When income {direction} by ${abs(income_delta):,.0f}, "
-                f"the estimated SAI changes from {baseline.sai} to {scenario.sai}."
-            ),
-        )
-
-
-class WorkbookAidCalculator:
-    methodology = (
-        "Workbook-backed mode. AidWise uses the provided Excel calculator through local "
-        "Excel automation so the estimate follows the supplied institutional model."
-    )
-
-    def __init__(self, workbook_path: str | Path | None = None):
-        self.workbook_path = Path(workbook_path) if workbook_path else find_workbook()
-        self.fallback = PrototypeAidCalculator()
-
-    def is_ready(self) -> bool:
-        return self.workbook_path is not None and win32com is not None
-
-    def calculate(self, aid_input: AidInput) -> CalculationResult:
-        if not self.is_ready():
-            return self.fallback.calculate(aid_input)
-
-        try:
-            with self._open_temp_workbook() as (excel, workbook):
-                sheet = workbook.Worksheets("Calculator")
-
-                for cell, value in self._to_workbook_values(aid_input).items():
-                    sheet.Range(cell).Value = value
-
-                excel.CalculateFullRebuild()
-
-                formula_type = self._text(sheet.Range("O16").Value)
-                sai_value = sheet.Range("O17").Value
-                max_pell = self._is_yes(sheet.Range("O18").Value)
-                min_pell = self._is_yes(sheet.Range("O19").Value)
-                assets_required = self._is_yes(sheet.Range("O20").Value)
-
-                result = CalculationResult(
-                    sai=int(round(float(sai_value))),
-                    minimum_pell_eligible=min_pell,
-                    maximum_pell_eligible=max_pell,
-                    methodology=self.methodology,
-                    formula_type=formula_type,
-                    assets_required=assets_required,
-                    rationale=[
-                        f"Workbook formula selected: {formula_type}",
-                        f"Assets required by workbook: {YES if assets_required else NO}",
-                        f"Workbook source: {self.workbook_path.name}",
-                    ],
-                )
-            if self.workbook_path.parent.name.lower() != "models":
-                result.warning = (
-                    "The workbook was found outside `data/models/`, but AidWise still used it "
-                    "successfully."
-                )
-            return result
-        except Exception as exc:
-            fallback = self.fallback.calculate(aid_input)
-            fallback.warning = (
-                "AidWise could not execute the official workbook and fell back to the starter "
-                f"calculator. Error: {exc}"
-            )
-            return fallback
-    def compare_income_change(
-        self, aid_input: AidInput, income_delta: float
-    ) -> ScenarioComparison:
-        baseline = self.calculate(aid_input)
-        scenario = self.calculate(aid_input.with_income_delta(income_delta))
-        direction = "decreases" if income_delta < 0 else "increases"
-        return ScenarioComparison(
-            baseline=baseline,
-            scenario=scenario,
-            summary=(
-                f"When income {direction} by ${abs(income_delta):,.0f}, "
-                f"the workbook-backed SAI changes from {baseline.sai} to {scenario.sai}."
-            ),
-        )
-
-    def calculate_student_info_row(self, row: int = 2) -> CalculationResult:
-        if not self.is_ready():
-            fallback = self.fallback.calculate(self.canonical_demo_input())
-            fallback.warning = (
-                "Student Info macro-flow emulation requires the workbook-backed mode."
-            )
-            return fallback
-
-        try:
-            with self._open_temp_workbook() as (excel, workbook):
-                student = workbook.Worksheets("Student Info")
-                calculator = workbook.Worksheets("Calculator")
-                calculator.Range(f"R2:BP2").Value = student.Range(f"A{row}:AY{row}").Value
-                excel.CalculateFullRebuild()
-                student.Range(f"AZ{row}:BB{row}").Value = calculator.Range("BQ2:BS2").Value
-                excel.CalculateFullRebuild()
-
-                sai_value = student.Range(f"AZ{row}").Value
-                min_pell = self._is_yes(student.Range(f"BA{row}").Value)
-                max_pell = self._is_yes(student.Range(f"BB{row}").Value)
-                return CalculationResult(
-                    sai=int(round(float(sai_value))),
-                    minimum_pell_eligible=min_pell,
-                    maximum_pell_eligible=max_pell,
-                    methodology=(
-                        "Workbook-backed Student Info flow. AidWise explicitly mirrors the "
-                        "workbook macro by copying Student Info columns A:AY into Calculator "
-                        "columns R:BP and reading results from BQ:BS."
-                    ),
-                    rationale=[
-                        f"Student Info row evaluated: {row}",
-                        "Copied Student Info A:AY into Calculator R:BP",
-                        "Read live outputs from Calculator BQ:BS",
-                    ],
-                )
-        except Exception as exc:
-            fallback = self.fallback.calculate(self.canonical_demo_input())
-            fallback.warning = (
-                "AidWise could not emulate the Student Info workbook flow and fell back to the "
-                f"starter calculator. Error: {exc}"
-            )
-            return fallback
 
     @staticmethod
     def canonical_demo_input() -> AidInput:
@@ -223,170 +64,543 @@ class WorkbookAidCalculator:
             student_state="CT",
         )
 
-    def load_calculator_demo_input(self) -> AidInput:
-        if self.workbook_path is None:
-            return self.canonical_demo_input()
-
-        from openpyxl import load_workbook
-
-        workbook = load_workbook(self.workbook_path, data_only=True, keep_vba=True)
-        sheet = workbook["Calculator"]
+    @staticmethod
+    def student_info_sample_input() -> AidInput:
         return AidInput(
-            dependency_status=self._text(sheet["B3"].value) or "Dependent",
-            parent_family_size=int(sheet["B5"].value or 4),
-            parent_1_dob=self._date(sheet["B6"].value),
-            parent_2_dob=self._date(sheet["B7"].value),
-            parent_schedule_abhdef=self._text(sheet["B8"].value) or NO,
-            parent_schedule_c=self._text(sheet["B9"].value) or NO,
-            parent_received_benefits=self._text(sheet["B10"].value) or NO,
-            parent_state=self._text(sheet["B11"].value) or "CT",
-            parent_filing_status=self._text(sheet["B13"].value) or "Married filing Jointly",
-            parent_agi=float(sheet["B14"].value or 0),
-            parent_ira_deductions=float(sheet["B15"].value or 0),
-            parent_tax_exempt_interest=float(sheet["B16"].value or 0),
-            parent_untaxed_pensions=float(sheet["B17"].value or 0),
-            parent_foreign_income_exclusion=float(sheet["B18"].value or 0),
-            parent_taxable_grants=float(sheet["B19"].value or 0),
-            parent_education_credits=float(sheet["B20"].value or 0),
-            parent_federal_work_study=float(sheet["B21"].value or 0),
-            parent_income_tax_paid=float(sheet["B22"].value or 0),
-            parent_1_wages=float(sheet["B23"].value or 0),
-            parent_1_schedule_c_income=float(sheet["B24"].value or 0),
-            parent_2_wages=float(sheet["B25"].value or 0),
-            parent_2_schedule_c_income=float(sheet["B26"].value or 0),
-            parent_child_support=float(sheet["B27"].value or 0),
-            parent_cash_savings=float(sheet["B28"].value or 0),
-            parent_investments=float(sheet["B29"].value or 0),
-            parent_business_farm=float(sheet["B30"].value or 0),
-            student_filing_status=self._text(sheet["B32"].value) or "Single",
-            student_agi=float(sheet["B33"].value or 0),
-            student_ira_deductions=float(sheet["B34"].value or 0),
-            student_tax_exempt_interest=float(sheet["B35"].value or 0),
-            student_untaxed_pensions=float(sheet["B36"].value or 0),
-            student_foreign_income_exclusion=float(sheet["B37"].value or 0),
-            student_taxable_grants=float(sheet["B38"].value or 0),
-            student_education_credits=float(sheet["B39"].value or 0),
-            student_federal_work_study=float(sheet["B40"].value or 0),
-            student_income_tax_paid=float(sheet["B41"].value or 0),
-            student_wages=float(sheet["B42"].value or 0),
-            student_schedule_c_income=float(sheet["B43"].value or 0),
-            spouse_wages=float(sheet["B44"].value or 0),
-            spouse_schedule_c_income=float(sheet["B45"].value or 0),
-            student_child_support=float(sheet["B46"].value or 0),
-            student_cash_savings=float(sheet["B47"].value or 0),
-            student_investments=float(sheet["B48"].value or 0),
-            student_business_farm=float(sheet["B49"].value or 0),
-            student_family_size=int(sheet["B51"].value or 1),
-            student_marital_status=self._text(sheet["B52"].value) or "Single",
-            student_dob=self._date(sheet["B53"].value),
-            student_schedule_abhdef=self._text(sheet["B54"].value) or NO,
-            student_schedule_c=self._text(sheet["B55"].value) or NO,
-            student_received_benefits=self._text(sheet["B56"].value) or NO,
-            student_state=self._text(sheet["B57"].value) or "CT",
+            dependency_status="Dependent",
+            parent_family_size=6,
+            parent_1_dob=date(1976, 10, 12),
+            parent_2_dob=date(1974, 2, 20),
+            parent_schedule_abhdef=YES,
+            parent_schedule_c=YES,
+            parent_received_benefits=NO,
+            parent_state="MA",
+            parent_filing_status="Married filing Jointly",
+            parent_agi=183147.0,
+            parent_untaxed_pensions=3570.0,
+            parent_income_tax_paid=19500.0,
+            parent_1_wages=114512.0,
+            parent_1_schedule_c_income=13956.0,
+            parent_cash_savings=50000.0,
+            student_filing_status="Single",
+            student_agi=10115.0,
+            student_family_size=1,
+            student_marital_status="Single",
+            student_dob=date(2006, 2, 6),
+            student_state="MA",
         )
 
-    @staticmethod
-    def _date(value: object) -> date | None:
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        return None
+    def calculate(self, aid_input: AidInput) -> CalculationResult:
+        components = self._calculate_components(aid_input)
+        max_pell_nonfiler = self._is_max_pell_nonfiler(aid_input)
+        maximum_pell_eligible = self._is_maximum_pell_eligible(aid_input)
+        minimum_pell_eligible = self._is_minimum_pell_eligible(aid_input)
 
-    @staticmethod
-    def _text(value: object) -> str:
-        return "" if value is None else str(value).strip()
+        if max_pell_nonfiler:
+            final_sai = -1500
+        elif maximum_pell_eligible:
+            final_sai = min(components.raw_sai, 0)
+        else:
+            final_sai = components.raw_sai
 
-    @staticmethod
-    def _is_yes(value: object) -> bool:
-        return str(value).strip().lower() == "yes"
+        rationale = [
+            f"Formula type selected: {components.formula_type}",
+            f"AGI plus foreign income exclusion used for Pell thresholds: ${components.agi_for_pell:,.0f}",
+            (
+                f"Maximum Pell threshold considered: ${components.max_pell_threshold:,.0f}"
+                if components.max_pell_threshold is not None
+                else "Maximum Pell threshold considered: not applicable"
+            ),
+            (
+                f"Minimum Pell threshold considered: ${components.min_pell_threshold:,.0f}"
+                if components.min_pell_threshold is not None
+                else "Minimum Pell threshold considered: not applicable"
+            ),
+            f"Assets required: {YES if components.assets_required else NO}",
+        ]
 
-    def _to_workbook_values(self, aid_input: AidInput) -> dict[str, object]:
-        return {
-            "B3": aid_input.dependency_status,
-            "B5": aid_input.parent_family_size,
-            "B6": self._excel_date(aid_input.parent_1_dob),
-            "B7": self._excel_date(aid_input.parent_2_dob),
-            "B8": aid_input.parent_schedule_abhdef,
-            "B9": aid_input.parent_schedule_c,
-            "B10": aid_input.parent_received_benefits,
-            "B11": aid_input.parent_state,
-            "B13": aid_input.parent_filing_status,
-            "B14": aid_input.parent_agi,
-            "B15": aid_input.parent_ira_deductions,
-            "B16": aid_input.parent_tax_exempt_interest,
-            "B17": aid_input.parent_untaxed_pensions,
-            "B18": aid_input.parent_foreign_income_exclusion,
-            "B19": aid_input.parent_taxable_grants,
-            "B20": aid_input.parent_education_credits,
-            "B21": aid_input.parent_federal_work_study,
-            "B22": aid_input.parent_income_tax_paid,
-            "B23": aid_input.parent_1_wages,
-            "B24": aid_input.parent_1_schedule_c_income,
-            "B25": aid_input.parent_2_wages,
-            "B26": aid_input.parent_2_schedule_c_income,
-            "B27": aid_input.parent_child_support,
-            "B28": aid_input.parent_cash_savings,
-            "B29": aid_input.parent_investments,
-            "B30": aid_input.parent_business_farm,
-            "B32": aid_input.student_filing_status,
-            "B33": aid_input.student_agi,
-            "B34": aid_input.student_ira_deductions,
-            "B35": aid_input.student_tax_exempt_interest,
-            "B36": aid_input.student_untaxed_pensions,
-            "B37": aid_input.student_foreign_income_exclusion,
-            "B38": aid_input.student_taxable_grants,
-            "B39": aid_input.student_education_credits,
-            "B40": aid_input.student_federal_work_study,
-            "B41": aid_input.student_income_tax_paid,
-            "B42": aid_input.student_wages,
-            "B43": aid_input.student_schedule_c_income,
-            "B44": aid_input.spouse_wages,
-            "B45": aid_input.spouse_schedule_c_income,
-            "B46": aid_input.student_child_support,
-            "B47": aid_input.student_cash_savings,
-            "B48": aid_input.student_investments,
-            "B49": aid_input.student_business_farm,
-            "B51": aid_input.student_family_size,
-            "B52": aid_input.student_marital_status,
-            "B53": self._excel_date(aid_input.student_dob),
-            "B54": aid_input.student_schedule_abhdef,
-            "B55": aid_input.student_schedule_c,
-            "B56": aid_input.student_received_benefits,
-            "B57": aid_input.student_state,
+        if components.formula_type == "Formula A":
+            rationale.append(
+                f"Parent contribution: ${components.parent_contribution:,.0f}; "
+                f"student income contribution: ${components.student_income_contribution:,.0f}; "
+                f"student asset contribution: ${components.student_asset_contribution:,.0f}"
+            )
+        else:
+            rationale.append(
+                f"Student income contribution: ${components.student_income_contribution:,.0f}; "
+                f"student asset contribution: ${components.student_asset_contribution:,.0f}"
+            )
+
+        details: dict[str, Any] = {
+            "raw_sai_before_pell_adjustment": components.raw_sai,
+            "agi_for_pell": round(components.agi_for_pell, 2),
+            "max_pell_threshold": components.max_pell_threshold,
+            "min_pell_threshold": components.min_pell_threshold,
+            "parent_contribution": round(components.parent_contribution, 2),
+            "student_income_contribution": round(components.student_income_contribution, 2),
+            "student_asset_contribution": round(components.student_asset_contribution, 2),
+            "max_pell_nonfiler_rule": max_pell_nonfiler,
         }
 
+        return CalculationResult(
+            sai=int(final_sai),
+            minimum_pell_eligible=minimum_pell_eligible,
+            maximum_pell_eligible=maximum_pell_eligible,
+            methodology=self.methodology,
+            formula_type=components.formula_type,
+            assets_required=components.assets_required,
+            details=details,
+            rationale=rationale,
+        )
+
+    def compare_income_change(
+        self, aid_input: AidInput, income_delta: float
+    ) -> ScenarioComparison:
+        baseline = self.calculate(aid_input)
+        scenario = self.calculate(aid_input.with_income_delta(income_delta))
+        direction = "decreases" if income_delta < 0 else "increases"
+        return ScenarioComparison(
+            baseline=baseline,
+            scenario=scenario,
+            summary=(
+                f"When income {direction} by ${abs(income_delta):,.0f}, "
+                f"the calculated SAI changes from {baseline.sai} to {scenario.sai}."
+            ),
+        )
+
+    def _calculate_components(self, aid_input: AidInput) -> SAIComponents:
+        formula_type = self._formula_type(aid_input)
+        assets_required = self._assets_required(aid_input)
+        agi_for_pell = self._agi_for_pell(aid_input)
+        max_threshold = self._maximum_pell_threshold(aid_input)
+        min_threshold = self._minimum_pell_threshold(aid_input)
+
+        if formula_type == "Formula A":
+            parent_contribution, student_income, student_assets, raw_sai = self._formula_a(
+                aid_input, assets_required
+            )
+            return SAIComponents(
+                formula_type=formula_type,
+                assets_required=assets_required,
+                raw_sai=raw_sai,
+                parent_contribution=parent_contribution,
+                student_income_contribution=student_income,
+                student_asset_contribution=student_assets,
+                max_pell_threshold=max_threshold,
+                min_pell_threshold=min_threshold,
+                agi_for_pell=agi_for_pell,
+            )
+        if formula_type == "Formula B":
+            student_income, student_assets, raw_sai = self._formula_b(aid_input, assets_required)
+            return SAIComponents(
+                formula_type=formula_type,
+                assets_required=assets_required,
+                raw_sai=raw_sai,
+                student_income_contribution=student_income,
+                student_asset_contribution=student_assets,
+                max_pell_threshold=max_threshold,
+                min_pell_threshold=min_threshold,
+                agi_for_pell=agi_for_pell,
+            )
+        student_income, student_assets, raw_sai = self._formula_c(aid_input, assets_required)
+        return SAIComponents(
+            formula_type=formula_type,
+            assets_required=assets_required,
+            raw_sai=raw_sai,
+            student_income_contribution=student_income,
+            student_asset_contribution=student_assets,
+            max_pell_threshold=max_threshold,
+            min_pell_threshold=min_threshold,
+            agi_for_pell=agi_for_pell,
+        )
+
+    def _formula_a(self, aid_input: AidInput, assets_required: bool) -> tuple[float, float, float, int]:
+        parent_total_income = (
+            aid_input.parent_agi
+            + aid_input.parent_ira_deductions
+            + aid_input.parent_tax_exempt_interest
+            + aid_input.parent_untaxed_pensions
+            + aid_input.parent_foreign_income_exclusion
+            - aid_input.parent_taxable_grants
+            - aid_input.parent_education_credits
+            - aid_input.parent_federal_work_study
+        )
+
+        parent_allowances = (
+            aid_input.parent_income_tax_paid
+            + self._parent_payroll_tax_allowance(aid_input)
+            + self._parent_income_protection_allowance(aid_input.parent_family_size)
+            + self._parent_employment_expense_allowance(aid_input)
+        )
+        parent_available_income = parent_total_income - parent_allowances
+        parent_net_worth = (
+            aid_input.parent_child_support
+            + aid_input.parent_cash_savings
+            + aid_input.parent_investments
+            + self._adjusted_business_farm_value(aid_input.parent_business_farm)
+        )
+        parent_asset_contribution = (
+            max(0.0, parent_net_worth) * 0.12 if assets_required else 0.0
+        )
+        parent_adjusted_available_income = parent_available_income + parent_asset_contribution
+        parent_contribution = self._assessment_from_adjusted_available_income(
+            parent_adjusted_available_income
+        )
+
+        student_total_income = (
+            aid_input.student_agi
+            + aid_input.student_ira_deductions
+            + aid_input.student_tax_exempt_interest
+            + aid_input.student_untaxed_pensions
+            + aid_input.student_foreign_income_exclusion
+            - aid_input.student_taxable_grants
+            - aid_input.student_education_credits
+            - aid_input.student_federal_work_study
+        )
+        student_allowances = (
+            aid_input.student_income_tax_paid
+            + self._dependent_student_payroll_tax_allowance(aid_input)
+            + 11_510
+            + max(0.0, -parent_adjusted_available_income)
+        )
+        student_available_income = student_total_income - student_allowances
+        student_income_contribution = max(student_available_income * 0.5, 0.0)
+
+        student_net_worth = (
+            aid_input.student_cash_savings
+            + aid_input.student_investments
+            + self._adjusted_business_farm_value(aid_input.student_business_farm)
+        )
+        student_asset_contribution = (
+            max(0.0, student_net_worth * 0.2) if assets_required else 0.0
+        )
+
+        raw_sai = max(
+            -1500,
+            int(
+                round(
+                    parent_contribution
+                    + student_income_contribution
+                    + student_asset_contribution
+                )
+            ),
+        )
+        return parent_contribution, student_income_contribution, student_asset_contribution, raw_sai
+
+    def _formula_b(self, aid_input: AidInput, assets_required: bool) -> tuple[float, float, int]:
+        total_income = self._student_total_income(aid_input)
+        allowances = (
+            aid_input.student_income_tax_paid
+            + self._independent_payroll_tax_allowance(aid_input)
+            + (29_350 if self._is_student_married(aid_input) else 18_310)
+            + self._formula_b_employment_expense_allowance(aid_input)
+        )
+        student_available_income = total_income - allowances
+        student_income_contribution = student_available_income * 0.5
+
+        net_worth = (
+            aid_input.student_child_support
+            + aid_input.student_cash_savings
+            + aid_input.student_investments
+            + self._adjusted_business_farm_value(aid_input.student_business_farm)
+        )
+        student_asset_contribution = (
+            max(0.0, net_worth * 0.2) if assets_required else 0.0
+        )
+        raw_sai = max(
+            -1500,
+            int(round(student_income_contribution + student_asset_contribution)),
+        )
+        return student_income_contribution, student_asset_contribution, raw_sai
+
+    def _formula_c(self, aid_input: AidInput, assets_required: bool) -> tuple[float, float, int]:
+        total_income = self._student_total_income(aid_input)
+        allowances = (
+            aid_input.student_income_tax_paid
+            + self._independent_payroll_tax_allowance(aid_input)
+            + self._formula_c_income_protection_allowance(aid_input)
+            + self._formula_c_employment_expense_allowance(aid_input)
+        )
+        student_available_income = total_income - allowances
+        net_worth = (
+            aid_input.student_child_support
+            + aid_input.student_cash_savings
+            + aid_input.student_investments
+            + self._adjusted_business_farm_value(aid_input.student_business_farm)
+        )
+        student_asset_contribution = (
+            max(0.0, net_worth * 0.07) if assets_required else 0.0
+        )
+        adjusted_available_income = student_available_income + student_asset_contribution
+        student_income_contribution = self._assessment_from_adjusted_available_income(
+            adjusted_available_income
+        )
+        raw_sai = max(-1500, int(round(student_income_contribution)))
+        return student_income_contribution, student_asset_contribution, raw_sai
+
+    def _student_total_income(self, aid_input: AidInput) -> float:
+        return (
+            aid_input.student_agi
+            + aid_input.student_ira_deductions
+            + aid_input.student_tax_exempt_interest
+            + aid_input.student_untaxed_pensions
+            + aid_input.student_foreign_income_exclusion
+            - aid_input.student_taxable_grants
+            - aid_input.student_education_credits
+            - aid_input.student_federal_work_study
+        )
+
+    def _formula_type(self, aid_input: AidInput) -> str:
+        if aid_input.dependency_status == "Dependent":
+            return "Formula A"
+        if aid_input.student_family_size > 2:
+            return "Formula C"
+        if self._is_student_unmarried(aid_input) and aid_input.student_family_size > 1:
+            return "Formula C"
+        return "Formula B"
+
+    def _is_maximum_pell_eligible(self, aid_input: AidInput) -> bool:
+        if self._is_max_pell_nonfiler(aid_input):
+            return True
+
+        threshold = self._maximum_pell_threshold(aid_input)
+        if threshold is None:
+            return False
+        agi_for_pell = self._agi_for_pell(aid_input)
+        return 0 < agi_for_pell <= threshold
+
+    def _is_minimum_pell_eligible(self, aid_input: AidInput) -> bool:
+        threshold = self._minimum_pell_threshold(aid_input)
+        if threshold is None:
+            return False
+        return self._agi_for_pell(aid_input) <= threshold
+
+    def _maximum_pell_threshold(self, aid_input: AidInput) -> float | None:
+        if self._is_max_pell_nonfiler(aid_input):
+            return None
+
+        poverty = self._poverty_guideline(
+            aid_input.parent_state if aid_input.dependency_status == "Dependent" else aid_input.student_state,
+            aid_input.parent_family_size if aid_input.dependency_status == "Dependent" else max(1, aid_input.student_family_size),
+        )
+        if aid_input.dependency_status == "Dependent":
+            return poverty * (2.25 if self._number_of_parents(aid_input) == 1 else 1.75)
+        if self._is_independent_single_parent(aid_input):
+            return poverty * 2.25
+        return poverty * 1.75
+
+    def _minimum_pell_threshold(self, aid_input: AidInput) -> float | None:
+        poverty = self._poverty_guideline(
+            aid_input.parent_state if aid_input.dependency_status == "Dependent" else aid_input.student_state,
+            aid_input.parent_family_size if aid_input.dependency_status == "Dependent" else max(1, aid_input.student_family_size),
+        )
+        if aid_input.dependency_status == "Dependent":
+            return poverty * (3.25 if self._number_of_parents(aid_input) == 1 else 2.75)
+        if self._is_independent_single_parent(aid_input):
+            return poverty * 4.0
+        if self._is_independent_parent_not_single(aid_input):
+            return poverty * 3.5
+        return poverty * 2.75
+
+    def _is_max_pell_nonfiler(self, aid_input: AidInput) -> bool:
+        if aid_input.dependency_status == "Dependent":
+            return aid_input.parent_filing_status == "Not required to file"
+        return aid_input.student_filing_status == "Not required to file"
+
+    def _assets_required(self, aid_input: AidInput) -> bool:
+        if aid_input.dependency_status == "Dependent":
+            exception_applies = aid_input.parent_state == "Outside of the US"
+            if exception_applies:
+                return True
+            no_assets = (
+                aid_input.parent_schedule_abhdef != YES
+                and (
+                    aid_input.parent_schedule_c != YES
+                    or aid_input.parent_received_benefits == YES
+                    or (
+                        aid_input.parent_schedule_c == YES
+                        and -10_001
+                        < (aid_input.parent_1_schedule_c_income + aid_input.parent_2_schedule_c_income)
+                        < 10_001
+                    )
+                )
+                and aid_input.parent_agi < 60_000
+            )
+            return not (no_assets or self._is_maximum_pell_eligible(aid_input))
+
+        no_assets = (
+            aid_input.student_schedule_abhdef != YES
+            and (
+                aid_input.student_schedule_c != YES
+                or aid_input.student_received_benefits == YES
+                or (
+                    aid_input.student_schedule_c == YES
+                    and -10_001
+                    < (aid_input.student_schedule_c_income + aid_input.spouse_schedule_c_income)
+                    < 10_001
+                )
+            )
+            and aid_input.student_agi < 60_000
+        )
+        return not (no_assets or self._is_maximum_pell_eligible(aid_input))
+
+    def _agi_for_pell(self, aid_input: AidInput) -> float:
+        if aid_input.dependency_status == "Dependent":
+            return aid_input.parent_agi + aid_input.parent_foreign_income_exclusion
+        return aid_input.student_agi + aid_input.student_foreign_income_exclusion
+
+    def _parent_income_protection_allowance(self, family_size: int) -> float:
+        family_size = max(2, family_size)
+        if family_size in PARENT_IPA_BASE:
+            return float(PARENT_IPA_BASE[family_size])
+        return float(PARENT_IPA_BASE[6] + (family_size - 6) * 6990)
+
+    def _formula_c_income_protection_allowance(self, aid_input: AidInput) -> float:
+        if self._is_student_married(aid_input):
+            family_size = max(3, aid_input.student_family_size)
+            if family_size in MARRIED_WITH_DEPENDENTS_IPA:
+                return float(MARRIED_WITH_DEPENDENTS_IPA[family_size])
+            return float(MARRIED_WITH_DEPENDENTS_IPA[6] + (family_size - 6) * 11110)
+        family_size = max(2, aid_input.student_family_size)
+        if family_size in SINGLE_WITH_DEPENDENTS_IPA:
+            return float(SINGLE_WITH_DEPENDENTS_IPA[family_size])
+        return float(SINGLE_WITH_DEPENDENTS_IPA[6] + (family_size - 6) * 13180)
+
+    def _parent_employment_expense_allowance(self, aid_input: AidInput) -> float:
+        combined_earned_income = self._parent_earned_income(aid_input)
+        return min(5000.0, combined_earned_income * 0.35)
+
+    def _formula_b_employment_expense_allowance(self, aid_input: AidInput) -> float:
+        if not self._is_student_married(aid_input):
+            return 0.0
+        return min(5000.0, self._student_earned_income(aid_input) * 0.35)
+
+    def _formula_c_employment_expense_allowance(self, aid_input: AidInput) -> float:
+        if self._is_student_married(aid_input):
+            return min(5000.0, self._student_earned_income(aid_input) * 0.35)
+        return min(5000.0, self._earned_student_only(aid_input) * 0.35)
+
+    def _parent_earned_income(self, aid_input: AidInput) -> float:
+        return max(aid_input.parent_1_wages + aid_input.parent_1_schedule_c_income, 0.0) + max(
+            aid_input.parent_2_wages + aid_input.parent_2_schedule_c_income, 0.0
+        )
+
+    def _earned_student_only(self, aid_input: AidInput) -> float:
+        return max(aid_input.student_wages + aid_input.student_schedule_c_income, 0.0)
+
+    def _student_earned_income(self, aid_input: AidInput) -> float:
+        return self._earned_student_only(aid_input) + max(
+            aid_input.spouse_wages + aid_input.spouse_schedule_c_income, 0.0
+        )
+
+    def _parent_payroll_tax_allowance(self, aid_input: AidInput) -> float:
+        parent1 = max(aid_input.parent_1_wages + aid_input.parent_1_schedule_c_income, 0.0)
+        parent2 = max(aid_input.parent_2_wages + aid_input.parent_2_schedule_c_income, 0.0)
+        status = aid_input.parent_filing_status
+        total = parent1 + parent2
+
+        if status in MARRIED_SEPARATE_FILING:
+            medicare = self._medicare_allowance(parent1, 125000) + self._medicare_allowance(parent2, 125000)
+        elif status in MARRIED_JOINT_FILING:
+            medicare = self._medicare_allowance(total, 250000)
+        else:
+            medicare = self._medicare_allowance(total, 200000)
+
+        oasdi_cap = 20906.4 if status in MARRIED_JOINT_FILING | MARRIED_SEPARATE_FILING or self._number_of_parents(aid_input) > 1 else 10453.2
+        oasdi = min(total * 0.062, oasdi_cap)
+        return medicare + oasdi
+
+    def _dependent_student_payroll_tax_allowance(self, aid_input: AidInput) -> float:
+        student_earned = self._earned_student_only(aid_input)
+        return self._medicare_allowance(student_earned, 200000) + min(student_earned * 0.062, 10453.2)
+
+    def _independent_payroll_tax_allowance(self, aid_input: AidInput) -> float:
+        student_earned = self._earned_student_only(aid_input)
+        spouse_earned = max(aid_input.spouse_wages + aid_input.spouse_schedule_c_income, 0.0)
+        total = student_earned + spouse_earned
+
+        if self._is_student_married(aid_input):
+            medicare = self._medicare_allowance(total, 250000)
+            oasdi = min(total * 0.062, 20906.4)
+        else:
+            medicare = self._medicare_allowance(student_earned, 200000)
+            oasdi = min(student_earned * 0.062, 10453.2)
+        return medicare + oasdi
+
     @staticmethod
-    def _excel_date(value: date | None) -> object:
-        if value is None:
-            return ""
-        return datetime.combine(value, datetime.min.time())
+    def _medicare_allowance(earned_income: float, threshold: float) -> float:
+        earned_income = max(earned_income, 0.0)
+        if earned_income <= threshold:
+            return earned_income * 0.0145
+        return threshold * 0.0145 + (earned_income - threshold) * 0.0235
 
-    @contextmanager
-    def _open_temp_workbook(self):
-        excel = None
-        workbook = None
-        temp_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                suffix=self.workbook_path.suffix,
-                delete=False,
-            ) as temp_file:
-                temp_path = Path(temp_file.name)
-            shutil.copy2(self.workbook_path, temp_path)
+    @staticmethod
+    def _adjusted_business_farm_value(net_worth: float) -> float:
+        net_worth = max(net_worth, 0.0)
+        if net_worth < 1:
+            return 0.0
+        if net_worth <= 175000:
+            return net_worth * 0.4
+        if net_worth <= 520000:
+            return 70000 + (net_worth - 175000) * 0.5
+        if net_worth <= 870000:
+            return 242500 + (net_worth - 520000) * 0.6
+        return 452500 + (net_worth - 870000)
 
-            pythoncom.CoInitialize()
-            excel = win32com.client.DispatchEx("Excel.Application")
-            excel.Visible = False
-            excel.DisplayAlerts = False
-            excel.AutomationSecurity = 3
-            workbook = excel.Workbooks.Open(str(temp_path), ReadOnly=False)
-            yield excel, workbook
-        finally:
-            if workbook is not None:
-                workbook.Close(False)
-            if excel is not None:
-                excel.Quit()
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-            pythoncom.CoUninitialize()
+    @staticmethod
+    def _assessment_from_adjusted_available_income(aai: float) -> float:
+        if aai < -8500:
+            return -1870.0
+        if aai <= 21800:
+            return aai * 0.22
+        if aai <= 27300:
+            return 4796 + (aai - 21800) * 0.25
+        if aai <= 32800:
+            return 6171 + (aai - 27300) * 0.29
+        if aai <= 38400:
+            return 7766 + (aai - 32800) * 0.34
+        if aai <= 43900:
+            return 9670 + (aai - 38400) * 0.40
+        return 11870 + (aai - 43900) * 0.47
+
+    def _number_of_parents(self, aid_input: AidInput) -> int:
+        count = int(aid_input.parent_1_dob is not None) + int(aid_input.parent_2_dob is not None)
+        if count:
+            return count
+        if aid_input.parent_filing_status in MARRIED_JOINT_FILING | MARRIED_SEPARATE_FILING:
+            return 2
+        return 1
+
+    @staticmethod
+    def _is_student_unmarried(aid_input: AidInput) -> bool:
+        return aid_input.student_marital_status in UNMARRIED_STUDENT_STATUSES
+
+    @staticmethod
+    def _is_student_married(aid_input: AidInput) -> bool:
+        return aid_input.student_marital_status in MARRIED_STUDENT_STATUSES
+
+    def _is_independent_single_parent(self, aid_input: AidInput) -> bool:
+        return self._is_student_unmarried(aid_input) and aid_input.student_family_size > 1
+
+    def _is_independent_parent_not_single(self, aid_input: AidInput) -> bool:
+        return self._is_student_married(aid_input) and aid_input.student_family_size > 2
+
+    def _poverty_guideline(self, state: str, family_size: int) -> float:
+        family_size = max(1, family_size)
+        bucket = self._state_bucket(state)
+        if bucket == ALASKA:
+            base, increment = 18810, 6730
+        elif bucket == HAWAII:
+            base, increment = 17310, 6190
+        else:
+            base, increment = 15060, 5380
+        return float(base + max(family_size - 1, 0) * increment)
+
+    @staticmethod
+    def _state_bucket(state: str) -> str:
+        value = str(state or "").strip().upper()
+        if value == ALASKA:
+            return ALASKA
+        if value == HAWAII:
+            return HAWAII
+        return OTHER_STATE
