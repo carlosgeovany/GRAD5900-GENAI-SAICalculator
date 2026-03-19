@@ -23,6 +23,14 @@ class AidCalculatorTests(unittest.TestCase):
         self.assertEqual(result.sai, -1500)
         self.assertTrue(result.maximum_pell_eligible)
 
+    def test_student_info_sample_matches_live_workbook_calculation_branch(self) -> None:
+        result = self.calculator.calculate(AidCalculator.student_info_sample_input())
+        self.assertEqual(result.formula_type, "Formula A")
+        self.assertEqual(result.sai, 37075)
+        self.assertFalse(result.minimum_pell_eligible)
+        self.assertFalse(result.maximum_pell_eligible)
+        self.assertTrue(result.assets_required)
+
     def test_independent_with_dependents_uses_formula_c(self) -> None:
         aid_input = AidCalculator.canonical_demo_input()
         aid_input.dependency_status = "Independent"

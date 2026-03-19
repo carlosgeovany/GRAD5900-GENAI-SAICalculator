@@ -485,6 +485,10 @@ class AidCalculator:
             aid_input.parent_2_wages + aid_input.parent_2_schedule_c_income, 0.0
         )
 
+    @staticmethod
+    def _parent_wage_income(aid_input: AidInput) -> float:
+        return max(aid_input.parent_1_wages, 0.0) + max(aid_input.parent_2_wages, 0.0)
+
     def _earned_student_only(self, aid_input: AidInput) -> float:
         return max(aid_input.student_wages + aid_input.student_schedule_c_income, 0.0)
 
@@ -493,9 +497,13 @@ class AidCalculator:
             aid_input.spouse_wages + aid_input.spouse_schedule_c_income, 0.0
         )
 
+    @staticmethod
+    def _student_wage_income(aid_input: AidInput) -> float:
+        return max(aid_input.student_wages, 0.0) + max(aid_input.spouse_wages, 0.0)
+
     def _parent_payroll_tax_allowance(self, aid_input: AidInput) -> float:
-        parent1 = max(aid_input.parent_1_wages + aid_input.parent_1_schedule_c_income, 0.0)
-        parent2 = max(aid_input.parent_2_wages + aid_input.parent_2_schedule_c_income, 0.0)
+        parent1 = max(aid_input.parent_1_wages, 0.0)
+        parent2 = max(aid_input.parent_2_wages, 0.0)
         status = aid_input.parent_filing_status
         total = parent1 + parent2
 
@@ -511,13 +519,13 @@ class AidCalculator:
         return medicare + oasdi
 
     def _dependent_student_payroll_tax_allowance(self, aid_input: AidInput) -> float:
-        student_earned = self._earned_student_only(aid_input)
+        student_earned = max(aid_input.student_wages, 0.0)
         return self._medicare_allowance(student_earned, 200000) + min(student_earned * 0.062, 10453.2)
 
     def _independent_payroll_tax_allowance(self, aid_input: AidInput) -> float:
-        student_earned = self._earned_student_only(aid_input)
-        spouse_earned = max(aid_input.spouse_wages + aid_input.spouse_schedule_c_income, 0.0)
-        total = student_earned + spouse_earned
+        student_earned = max(aid_input.student_wages, 0.0)
+        spouse_earned = max(aid_input.spouse_wages, 0.0)
+        total = self._student_wage_income(aid_input)
 
         if self._is_student_married(aid_input):
             medicare = self._medicare_allowance(total, 250000)

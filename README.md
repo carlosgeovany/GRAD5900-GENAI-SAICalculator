@@ -85,26 +85,132 @@ Supported file types:
 
 ## CSV input format
 
-AidWise expects one student per row. The CSV must include every field in the `AidInput` schema.
+AidWise expects one student per row. The CSV must include every column in the `AidInput` schema, even if some values are left blank or set to `0`.
 
 A starter template is included here:
 
 - `data/templates/student_input_template.csv`
 
-Key columns include:
+The safest workflow is:
 
-- `dependency_status`
-- `parent_family_size`
-- `parent_filing_status`
+1. Copy `data/templates/student_input_template.csv`
+2. Keep the header row exactly as-is
+3. Add one student per row
+4. Leave unused numeric fields as `0`
+5. Leave optional date fields blank if they do not apply
+
+### Formatting rules
+
+- One student per row
+- The first row must be the header row
+- Column names must match exactly
+- Date fields should use `YYYY-MM-DD`
+- Numeric fields should be plain numbers like `108000` or `600.50`
+- Yes/no fields should use `Yes` or `No`
+- Blank optional date cells are allowed
+- Blank numeric cells are treated as `0`
+
+### Required header columns
+
+Use this exact header order:
+
+```csv
+dependency_status,parent_family_size,parent_1_dob,parent_2_dob,parent_schedule_abhdef,parent_schedule_c,parent_received_benefits,parent_state,parent_filing_status,parent_agi,parent_ira_deductions,parent_tax_exempt_interest,parent_untaxed_pensions,parent_foreign_income_exclusion,parent_taxable_grants,parent_education_credits,parent_federal_work_study,parent_income_tax_paid,parent_1_wages,parent_1_schedule_c_income,parent_2_wages,parent_2_schedule_c_income,parent_child_support,parent_cash_savings,parent_investments,parent_business_farm,student_filing_status,student_agi,student_ira_deductions,student_tax_exempt_interest,student_untaxed_pensions,student_foreign_income_exclusion,student_taxable_grants,student_education_credits,student_federal_work_study,student_income_tax_paid,student_wages,student_schedule_c_income,spouse_wages,spouse_schedule_c_income,student_child_support,student_cash_savings,student_investments,student_business_farm,student_family_size,student_marital_status,student_dob,student_schedule_abhdef,student_schedule_c,student_received_benefits,student_state
+```
+
+### Column guide
+
+Core identifiers:
+
+- `dependency_status`: `Dependent` or `Independent`
+- `parent_family_size`: household size for dependent-student parent calculation
+- `student_family_size`: household size for the student calculation
+- `student_marital_status`: for example `Single`, `Married`, `Remarried`, `Separated`, `Divorced`, `Widowed`
+- `parent_filing_status`: for example `Married filing Jointly`, `Married filing Separate`, `Single`, `Head of Household`, `Qualifying surviving spouse`, `Not required to file`
+- `student_filing_status`: for example `Single`, `Married filing Jointly`, `Married filing Separate`, `Head of Household`, `Not required to file`
+
+Date fields:
+
+- `parent_1_dob`
+- `parent_2_dob`
+- `student_dob`
+
+Parent yes/no fields:
+
+- `parent_schedule_abhdef`
+- `parent_schedule_c`
+- `parent_received_benefits`
+
+Student yes/no fields:
+
+- `student_schedule_abhdef`
+- `student_schedule_c`
+- `student_received_benefits`
+
+Parent location and income fields:
+
+- `parent_state`
 - `parent_agi`
+- `parent_ira_deductions`
+- `parent_tax_exempt_interest`
+- `parent_untaxed_pensions`
+- `parent_foreign_income_exclusion`
+- `parent_taxable_grants`
+- `parent_education_credits`
+- `parent_federal_work_study`
 - `parent_income_tax_paid`
-- `parent_1_wages`
-- `student_filing_status`
-- `student_agi`
-- `student_family_size`
-- `student_marital_status`
 
-The template includes all required columns, including optional fields that default to `0`, `No`, or blank dates.
+Parent earnings and assets:
+
+- `parent_1_wages`
+- `parent_1_schedule_c_income`
+- `parent_2_wages`
+- `parent_2_schedule_c_income`
+- `parent_child_support`
+- `parent_cash_savings`
+- `parent_investments`
+- `parent_business_farm`
+
+Student and spouse income fields:
+
+- `student_agi`
+- `student_ira_deductions`
+- `student_tax_exempt_interest`
+- `student_untaxed_pensions`
+- `student_foreign_income_exclusion`
+- `student_taxable_grants`
+- `student_education_credits`
+- `student_federal_work_study`
+- `student_income_tax_paid`
+- `student_wages`
+- `student_schedule_c_income`
+- `spouse_wages`
+- `spouse_schedule_c_income`
+
+Student asset fields:
+
+- `student_child_support`
+- `student_cash_savings`
+- `student_investments`
+- `student_business_farm`
+- `student_state`
+
+### Minimal row behavior
+
+Even though every header must be present, many rows will use only part of the schema:
+
+- A dependent student will mostly use the parent fields plus a smaller set of student fields
+- An independent student will mostly use the student and spouse fields
+- If a field does not apply, keep the column and use `0`, `No`, or a blank date
+
+### Example row
+
+The included template already contains a working example row. A shortened illustration looks like this:
+
+```csv
+dependency_status,parent_family_size,parent_1_dob,parent_2_dob,parent_schedule_abhdef,parent_schedule_c,parent_received_benefits,parent_state,parent_filing_status,parent_agi,parent_income_tax_paid,parent_1_wages,student_filing_status,student_agi,student_family_size,student_marital_status,student_dob,student_state
+Dependent,6,1976-06-05,1983-08-10,No,No,No,CT,Married filing Jointly,108000,10100,108000,Single,0,1,Single,2006-02-06,CT
+```
 
 ## Run the app
 
