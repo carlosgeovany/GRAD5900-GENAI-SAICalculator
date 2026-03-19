@@ -118,6 +118,16 @@ AidWise now uses the provided workbook as the deterministic calculation engine:
 
 This gives us workbook-aligned results without having to guess formula behavior.
 
+AidWise also now mirrors the workbook's `Student Info` macro flow explicitly in Python:
+
+1. Copy `Student Info!A:AY` for a selected row.
+2. Paste those values into `Calculator!R:BP`.
+3. Recalculate the workbook.
+4. Read the live outputs from `Calculator!BQ:BS`.
+5. Write those back to `Student Info!AZ:BB`.
+
+This avoids relying on VBA execution just to understand how the `Student Info` sheet feeds the calculator.
+
 ### Explanation
 
 AidWise combines:
@@ -138,16 +148,16 @@ and then uses the OpenAI API, when available, to generate grounded plain-languag
   - `Assets Required = Yes`
 - These values are covered by `tests/test_calculator.py`.
 
-## Known issue
+## Student Info Flow
 
-The workbook `Student Info` sheet appears to rely on additional macro-driven behavior or a refresh step. When its visible row-2 inputs are copied directly into the live `Calculator` tab and recalculated, the outputs do not match the stored `Student Info` values. That means the `Calculator` tab is currently the trustworthy path for automated validation unless we wire up the macro flow explicitly.
+AidWise now mirrors the workbook's `Student Info` macro flow directly and follows the live recalculated workbook values rather than relying on saved worksheet caches. For example, `Student Info` row 2 currently recalculates to `SAI = -1499`, `Min Pell = Yes`, and `Max Pell = Yes` through the live workbook path.
 
 ## Next steps
 
-1. Trace or automate the workbook macro flow behind `Student Info`.
-2. Port the workbook logic into pure Python so AidWise does not depend on local Excel.
-3. Add page-aware citations for the PDF.
-4. Expand validation with more workbook scenarios.
+1. Port the workbook logic into pure Python so AidWise does not depend on local Excel.
+2. Add page-aware citations for the PDF.
+3. Expand validation with more workbook scenarios.
+4. Add a dedicated workflow for sanitizing `Student Info` metadata fields before sharing the workbook.
 
 ## Disclaimer
 

@@ -4,6 +4,7 @@ from datetime import date, datetime
 from pathlib import Path
 import shutil
 import tempfile
+from contextlib import contextmanager
 
 import pythoncom
 
@@ -100,49 +101,34 @@ class WorkbookAidCalculator:
         if not self.is_ready():
             return self.fallback.calculate(aid_input)
 
-        excel = None
-        workbook = None
-        temp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                suffix=self.workbook_path.suffix,
-                delete=False,
-            ) as temp_file:
-                temp_path = Path(temp_file.name)
-            shutil.copy2(self.workbook_path, temp_path)
+            with self._open_temp_workbook() as (excel, workbook):
+                sheet = workbook.Worksheets("Calculator")
 
-            pythoncom.CoInitialize()
-            excel = win32com.client.DispatchEx("Excel.Application")
-            excel.Visible = False
-            excel.DisplayAlerts = False
-            excel.AutomationSecurity = 3
-            workbook = excel.Workbooks.Open(str(temp_path), ReadOnly=False)
-            sheet = workbook.Worksheets("Calculator")
+                for cell, value in self._to_workbook_values(aid_input).items():
+                    sheet.Range(cell).Value = value
 
-            for cell, value in self._to_workbook_values(aid_input).items():
-                sheet.Range(cell).Value = value
+                excel.CalculateFullRebuild()
 
-            excel.CalculateFullRebuild()
+                formula_type = self._text(sheet.Range("O16").Value)
+                sai_value = sheet.Range("O17").Value
+                max_pell = self._is_yes(sheet.Range("O18").Value)
+                min_pell = self._is_yes(sheet.Range("O19").Value)
+                assets_required = self._is_yes(sheet.Range("O20").Value)
 
-            formula_type = self._text(sheet.Range("O16").Value)
-            sai_value = sheet.Range("O17").Value
-            max_pell = self._is_yes(sheet.Range("O18").Value)
-            min_pell = self._is_yes(sheet.Range("O19").Value)
-            assets_required = self._is_yes(sheet.Range("O20").Value)
-
-            result = CalculationResult(
-                sai=int(round(float(sai_value))),
-                minimum_pell_eligible=min_pell,
-                maximum_pell_eligible=max_pell,
-                methodology=self.methodology,
-                formula_type=formula_type,
-                assets_required=assets_required,
-                rationale=[
-                    f"Workbook formula selected: {formula_type}",
-                    f"Assets required by workbook: {YES if assets_required else NO}",
-                    f"Workbook source: {self.workbook_path.name}",
-                ],
-            )
+                result = CalculationResult(
+                    sai=int(round(float(sai_value))),
+                    minimum_pell_eligible=min_pell,
+                    maximum_pell_eligible=max_pell,
+                    methodology=self.methodology,
+                    formula_type=formula_type,
+                    assets_required=assets_required,
+                    rationale=[
+                        f"Workbook formula selected: {formula_type}",
+                        f"Assets required by workbook: {YES if assets_required else NO}",
+                        f"Workbook source: {self.workbook_path.name}",
+                    ],
+                )
             if self.workbook_path.parent.name.lower() != "models":
                 result.warning = (
                     "The workbook was found outside `data/models/`, but AidWise still used it "
@@ -156,15 +142,6 @@ class WorkbookAidCalculator:
                 f"calculator. Error: {exc}"
             )
             return fallback
-        finally:
-            if workbook is not None:
-                workbook.Close(False)
-            if excel is not None:
-                excel.Quit()
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-            pythoncom.CoUninitialize()
-
     def compare_income_change(
         self, aid_input: AidInput, income_delta: float
     ) -> ScenarioComparison:
@@ -179,6 +156,49 @@ class WorkbookAidCalculator:
                 f"the workbook-backed SAI changes from {baseline.sai} to {scenario.sai}."
             ),
         )
+
+    def calculate_student_info_row(self, row: int = 2) -> CalculationResult:
+        if not self.is_ready():
+            fallback = self.fallback.calculate(self.canonical_demo_input())
+            fallback.warning = (
+                "Student Info macro-flow emulation requires the workbook-backed mode."
+            )
+            return fallback
+
+        try:
+            with self._open_temp_workbook() as (excel, workbook):
+                student = workbook.Worksheets("Student Info")
+                calculator = workbook.Worksheets("Calculator")
+                calculator.Range(f"R2:BP2").Value = student.Range(f"A{row}:AY{row}").Value
+                excel.CalculateFullRebuild()
+                student.Range(f"AZ{row}:BB{row}").Value = calculator.Range("BQ2:BS2").Value
+                excel.CalculateFullRebuild()
+
+                sai_value = student.Range(f"AZ{row}").Value
+                min_pell = self._is_yes(student.Range(f"BA{row}").Value)
+                max_pell = self._is_yes(student.Range(f"BB{row}").Value)
+                return CalculationResult(
+                    sai=int(round(float(sai_value))),
+                    minimum_pell_eligible=min_pell,
+                    maximum_pell_eligible=max_pell,
+                    methodology=(
+                        "Workbook-backed Student Info flow. AidWise explicitly mirrors the "
+                        "workbook macro by copying Student Info columns A:AY into Calculator "
+                        "columns R:BP and reading results from BQ:BS."
+                    ),
+                    rationale=[
+                        f"Student Info row evaluated: {row}",
+                        "Copied Student Info A:AY into Calculator R:BP",
+                        "Read live outputs from Calculator BQ:BS",
+                    ],
+                )
+        except Exception as exc:
+            fallback = self.fallback.calculate(self.canonical_demo_input())
+            fallback.warning = (
+                "AidWise could not emulate the Student Info workbook flow and fell back to the "
+                f"starter calculator. Error: {exc}"
+            )
+            return fallback
 
     @staticmethod
     def canonical_demo_input() -> AidInput:
@@ -341,3 +361,32 @@ class WorkbookAidCalculator:
         if value is None:
             return ""
         return datetime.combine(value, datetime.min.time())
+
+    @contextmanager
+    def _open_temp_workbook(self):
+        excel = None
+        workbook = None
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=self.workbook_path.suffix,
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+            shutil.copy2(self.workbook_path, temp_path)
+
+            pythoncom.CoInitialize()
+            excel = win32com.client.DispatchEx("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.AutomationSecurity = 3
+            workbook = excel.Workbooks.Open(str(temp_path), ReadOnly=False)
+            yield excel, workbook
+        finally:
+            if workbook is not None:
+                workbook.Close(False)
+            if excel is not None:
+                excel.Quit()
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            pythoncom.CoUninitialize()
