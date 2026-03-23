@@ -226,6 +226,14 @@ Workflow:
 4. Ask AidWise to explain the result or run a what-if income comparison.
 5. Ask follow-up questions about why that student got the displayed outcome.
 
+## Screenshots
+
+![AidWise Screenshot 1](docs/images/Screenshot%202026-03-23%20124944.png)
+
+![AidWise Screenshot 2](docs/images/Screenshot%202026-03-23%20125048.png)
+
+![AidWise Screenshot 3](docs/images/Screenshot%202026-03-23%20125111.png)
+
 ## Run tests
 
 ```powershell
