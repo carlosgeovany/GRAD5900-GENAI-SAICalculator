@@ -91,8 +91,17 @@ class SimpleRetriever:
         text_parts: list[str] = []
         with fitz.open(path) as pdf:
             for page in pdf:
-                text_parts.append(page.get_text())
-        return "\n".join(text_parts)
+                page_text = page.get_text()
+                # Clean up common PDF artifacts
+                page_text = re.sub(r'\.{4,}', '', page_text)  # Remove leader dots from TOC (4+ dots)
+                page_text = re.sub(r'(?m)^[^\w]*\.{2,}[^\w]*$', '', page_text)  # Remove lines that are mostly dots
+                page_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', page_text)  # Normalize multiple newlines
+                page_text = re.sub(r'(?m)^[^\w]*$', '', page_text)  # Remove lines with only non-word chars
+                text_parts.append(page_text.strip())
+        full_text = "\n\n".join(text_parts)
+        # Final cleanup
+        full_text = re.sub(r'\n{3,}', '\n\n', full_text)  # Max two newlines
+        return full_text.strip()
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
